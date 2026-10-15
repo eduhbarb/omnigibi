@@ -39,6 +39,24 @@ def _as_list(value: str | None, default: tuple[str, ...]) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def _default_data_dir() -> Path:
+    """Pasta de dados local.
+
+    Segue o diretorio do arquivo SQLite quando ``DATABASE_URL`` for sqlite (util
+    em ambientes serverless, onde so ``/tmp`` e gravavel). Caso contrario usa
+    ``BASE_DIR/data``.
+    """
+    url = os.getenv("DATABASE_URL") or ""
+    if url.startswith("sqlite"):
+        raw = url.split("///", 1)[-1]
+        if raw and raw not in {":memory:", ""}:
+            try:
+                return Path(raw).expanduser().resolve().parent
+            except OSError:  # pragma: no cover - caminho invalido no sistema
+                pass
+    return BASE_DIR / "data"
+
+
 @dataclass(frozen=True)
 class Settings:
     """Configuracao imutavel da aplicacao."""
@@ -54,7 +72,7 @@ class Settings:
     )
 
     web_dir: Path = field(default_factory=lambda: BASE_DIR / "web")
-    data_dir: Path = field(default_factory=lambda: BASE_DIR / "data")
+    data_dir: Path = field(default_factory=_default_data_dir)
 
     enabled_sources: list[str] = field(
         default_factory=lambda: _as_list(
@@ -92,7 +110,16 @@ class Settings:
     related_threshold: float = 0.2
 
     def ensure_dirs(self) -> None:
-        self.data_dir.mkdir(parents=True, exist_ok=True)
+        """Garante a pasta de dados quando o sistema de arquivos permite.
+
+        Em runtimes serverless (Vercel) o codigo roda em um FS somente leitura,
+        exceto ``/tmp``; nesse caso a criacao falha e deve ser ignorada, pois o
+        banco aponta para um caminho gravavel.
+        """
+        try:
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
 
 
 settings = Settings()
