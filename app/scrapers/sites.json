@@ -1,0 +1,17 @@
+{
+  "comix": {
+    "label": "Comix Book Shop",
+    "homepage": "https://www.comix.com.br",
+    "search_url": "https://www.comix.com.br/busca?q={query}",
+    "enabled": true,
+    "selectors": {
+      "item": ".product-item, .product, li.item",
+      "title": ".product-name, .name, h3, h2",
+      "price": ".price, .preco, .product-price",
+      "link": "a",
+      "image": "img"
+    },
+    "price_attribute": null,
+    "limit": 12
+  }
+}

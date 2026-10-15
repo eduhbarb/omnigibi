@@ -1,0 +1,37 @@
+# Ambiente virtual
+.venv/
+venv/
+env/
+
+# Banco de dados local e arquivos gerados
+data/
+*.db
+*.db-wal
+*.db-shm
+*.csv
+
+# Configuracao local
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Vercel / Node
+.vercel/
+node_modules/
+
+# Rascunhos de HTML coletados manualmente (nao usados pelo app/testes)
+/amazon.html
+/panini_abs.html
+/panini_home.html
+
+# Editores / SO
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini

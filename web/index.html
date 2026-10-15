@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Omnigibi — Monitor de Preços de HQs</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="stylesheet" href="/static/styles.css?v=1.4.0" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📚</text></svg>" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand__mark">OG</span>
+      <div class="brand__text">
+        <h1>Omnigibi</h1>
+        <p class="brand__sub">Menor preço já registrado &middot; histórico de variações</p>
+      </div>
+    </div>
+
+    <div class="stats" id="stats" aria-label="Indicadores da banca">
+      <div class="stat" title="Quadrinhos na sua prateleira"><span class="stat__value" id="stat-comics">–</span><span class="stat__label">na banca</span></div>
+      <div class="stat" title="Ofertas ativas coletadas nas lojas"><span class="stat__value" id="stat-offers">–</span><span class="stat__label">ofertas</span></div>
+      <div class="stat" title="Mudanças registradas no melhor preço entre as lojas (altas + quedas)"><span class="stat__value" id="stat-history">–</span><span class="stat__label">mudanças</span></div>
+      <div class="stat" title="Vezes em que o melhor preço caiu"><span class="stat__value" id="stat-drops">–</span><span class="stat__label">quedas</span></div>
+    </div>
+
+    <div class="topbar__actions">
+      <button class="btn btn--ghost" id="btn-refresh-all" title="Reconsulta todas as lojas agora">↻ Atualizar tudo</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="panel panel--search">
+      <h2 class="panel__title">🔎 Sistema inteligente de busca de preços</h2>
+      <p class="panel__hint">Digite o nome do quadrinho. O sistema consulta as lojas em paralelo, identifica a edição (volume/número) de cada título, agrupa ofertas equivalentes e mostra o menor preço — comparando com o menor valor já registrado no histórico. Volumes diferentes nunca são misturados: eles aparecem em “outros volumes e relacionados”.</p>
+
+      <form id="search-form" class="search">
+        <input type="search" id="search-input" placeholder="Ex.: Batman &amp; Robin: Ano Um, Sandman Vol. 1, Watchmen Edição Definitiva..." autocomplete="off" />
+        <button class="btn btn--primary" type="submit">Buscar preços</button>
+      </form>
+
+      <div class="sources" id="sources"></div>
+
+      <div id="search-feedback" class="feedback" hidden></div>
+      <div id="search-results" class="results"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel__head">
+        <h2 class="panel__title">🗄️ Prateleira — monitoramento contínuo</h2>
+        <div class="filters">
+          <input type="search" id="filter-banca" placeholder="Filtrar prateleira..." />
+          <label class="switch">
+            <input type="checkbox" id="filter-lowest" />
+            <span>só no menor preço</span>
+          </label>
+        </div>
+      </div>
+      <div id="banca" class="shelf"></div>
+    </section>
+
+    <section class="panel">
+      <h2 class="panel__title">📉 Variações recentes registradas</h2>
+      <p class="panel__hint">Toda mudança de preço é gravada com o quanto subiu/caiu (R$ e %) e o desconto vigente em relação ao preço de capa.</p>
+      <div id="changes" class="feed"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel__head">
+        <h2 class="panel__title">🔔 Avisos <span class="count-badge" id="alerts-count" hidden>0</span></h2>
+        <div class="filters">
+          <button class="btn btn--ghost btn--sm" id="btn-ack-alerts">marcar como lidos</button>
+        </div>
+      </div>
+      <p class="panel__hint">Produto esgotado não é descartado: continua na prateleira marcado como “em falta”. Quando uma loja monitorada volta a ter estoque, o aviso aparece aqui.</p>
+      <div id="alerts" class="feed"></div>
+    </section>
+    <section class="panel panel--transfer">
+      <h2 class="panel__title">💾 Backup — exportar e importar</h2>
+      <p class="panel__hint">Exporta a prateleira inteira (quadrinhos, histórico e preferências) em um arquivo JSON. A importação faz <b>merge</b>: junta com o que já existe, sem apagar nada. Use “substituir” marcando aplicar preferências do arquivo apenas se quiser trocar as suas.</p>
+      <div class="transfer">
+        <button class="btn btn--primary" id="btn-export">⬇ Exportar dados (JSON)</button>
+        <button class="btn btn--ghost" id="btn-import">⬆ Importar dados (JSON)</button>
+        <input type="file" id="import-file" accept="application/json,.json" hidden />
+        <label class="switch">
+          <input type="checkbox" id="import-apply-prefs" />
+          <span>aplicar preferências do arquivo</span>
+        </label>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <p>Desenvolvido por <strong>Eduardo Barbosa</strong></p>
+  </footer>
+
+  <div class="modal" id="modal" hidden>
+    <div class="modal__backdrop" data-close></div>
+    <div class="modal__box" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+      <header class="modal__head">
+        <h3 id="modal-title">Detalhes</h3>
+        <button class="icon-btn" data-close aria-label="Fechar">✕</button>
+      </header>
+      <div class="modal__body" id="modal-body"></div>
+    </div>
+  </div>
+
+  <div class="toasts" id="toasts"></div>
+
+  <script src="/static/app.js?v=1.4.0"></script>
+</body>
+</html>

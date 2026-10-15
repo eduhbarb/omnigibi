@@ -1,0 +1,18 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "builds": [
+    { "src": "api/index.py", "use": "@vercel/python" },
+    { "src": "web/**", "use": "@vercel/static" }
+  ],
+  "routes": [
+    { "src": "/static/(.*)", "dest": "/web/$1" },
+    { "src": "/", "dest": "/web/index.html" },
+    { "src": "/(.*)", "dest": "/api/index.py" }
+  ],
+  "env": {
+    "SCHEDULER_ENABLED": "false",
+    "SEED_DEMO_DATA": "false",
+    "ENABLED_SOURCES": "mercadolivre,amazon,panini",
+    "DATABASE_URL": "sqlite:////tmp/omnigibi.db"
+  }
+}

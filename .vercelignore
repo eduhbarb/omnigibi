@@ -1,0 +1,16 @@
+# Nao enviar para a Vercel (build/upload mais leve).
+.venv/
+venv/
+.git/
+.pytest_cache/
+__pycache__/
+data/
+*.db
+*.db-wal
+*.db-shm
+.env
+amazon.html
+panini_abs.html
+panini_home.html
+node_modules/
+.vercel/
