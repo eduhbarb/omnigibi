@@ -89,6 +89,67 @@ async function api(path, options = {}) {
   return payload;
 }
 
+/* ------------------------------------------ persistência local do navegador
+ * A fonte da verdade é o backend (SQLite). Só que na Vercel o arquivo vive em
+ * /tmp e some no "cold start", deixando a prateleira vazia. Para ela reaparecer
+ * na hora, espelhamos o export completo no localStorage e restauramos quando o
+ * servidor volta vazio. É cache de recuperação, não a fonte da verdade. */
+const LOCAL_BACKUP_KEY = "omnigibi:auto-backup";
+
+function readLocalBackup() {
+  try {
+    const raw = localStorage.getItem(LOCAL_BACKUP_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+let backupTimer = null;
+function scheduleBackup(delay = 600) {
+  clearTimeout(backupTimer);
+  backupTimer = setTimeout(async () => {
+    try {
+      const data = await api("/api/export");
+      if (!data?.comics?.length) {
+        // servidor vazio (cold start): nunca sobrescreve um backup bom.
+        const existing = readLocalBackup();
+        if (existing?.comics?.length) return;
+      }
+      localStorage.setItem(LOCAL_BACKUP_KEY, JSON.stringify(data));
+    } catch {
+      /* cota cheia ou modo privado: segue sem backup local */
+    }
+  }, delay);
+}
+
+async function restoreBackupIfEmpty() {
+  if (state.banca.length) return false;
+  const data = readLocalBackup();
+  if (!data || !Array.isArray(data.comics) || !data.comics.length) return false;
+  try {
+    const res = await api("/api/import", { method: "POST", body: JSON.stringify(data) });
+    toast(`Prateleira restaurada do navegador: ${res.detail}`, "ok");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function pendingCard(cached) {
+  const node = document.createElement("article");
+  node.className = "card card--pending";
+  node.innerHTML = `
+    <div class="card__top">
+      ${coverMarkup(cached.image_url, cached.title)}
+      <div class="card__body">
+        <div class="card__title">${esc(cached.title)}</div>
+        <div class="card__meta"><span class="spinner"></span> adicionando à prateleira…</div>
+      </div>
+    </div>`;
+  return node;
+}
+
 function toast(message, type = "ok") {
   const node = document.createElement("div");
   node.className = `toast toast--${type === "err" ? "err" : "ok"}`;
@@ -511,7 +572,15 @@ async function addToBanca(title, button) {
 
   button.disabled = true;
   button.textContent = "adicionando...";
+
+  // Feedback instantâneo: cartão provisório até o servidor responder.
+  const container = $("#banca");
+  container?.querySelector(".empty")?.remove();
+  const phantom = container ? pendingCard(cached) : null;
+  if (phantom) container.prepend(phantom);
+
   try {
+    // As ofertas já vieram da busca: grava direto. Sem re-scraping síncrono.
     const response = await api("/api/comics", {
       method: "POST",
       body: JSON.stringify({
@@ -523,12 +592,13 @@ async function addToBanca(title, button) {
         reference_price: cached.reference_price || cached.best.list_price || null,
         offers: cached.offers,
         sources: selectedSources(),
-        scrape: true,
+        scrape: false,
       }),
     });
     toast(response.detail, "ok");
     await Promise.all([loadBanca(), loadStats(), loadChanges(), loadAlerts()]);
   } catch (error) {
+    phantom?.remove();
     toast(`Erro ao adicionar: ${error.message}`, "err");
     button.disabled = false;
     button.textContent = "＋ Adicionar à banca";
@@ -565,6 +635,8 @@ async function loadBanca() {
     const points = state.spark.get(Number(canvas.dataset.spark));
     if (points) drawSpark(canvas, points);
   });
+
+  scheduleBackup();
 }
 
 function bancaCard(comic) {
@@ -939,6 +1011,11 @@ async function init() {
   }
 
   await Promise.all([loadBanca(), loadStats(), loadChanges(), loadAlerts()]);
+
+  // Servidor vazio (cold start na Vercel)? Traz a prateleira do backup local.
+  if (await restoreBackupIfEmpty()) {
+    await Promise.all([loadBanca(), loadStats(), loadChanges(), loadAlerts()]);
+  }
 
   $("#search-form").addEventListener("submit", runSearch);
 

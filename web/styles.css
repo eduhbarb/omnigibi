@@ -205,6 +205,9 @@ h1, h2, h3 { margin: 0; font-weight: 700; }
 }
 .card:hover { border-color: rgba(255, 204, 0, .5); transform: translateY(-2px); }
 
+.card--pending { border-style: dashed; opacity: .75; }
+.card--pending:hover { transform: none; }
+
 .card__top { display: flex; gap: 13px; }
 .cover {
   position: relative;
