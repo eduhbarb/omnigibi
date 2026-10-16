@@ -33,6 +33,7 @@ from app.services.price_service import (
     recent_changes,
 )
 from app.services.search_service import smart_search
+from app.services.state_service import load_state, open_state_session, run_action
 from app.services.text import normalize
 from app.services.transfer_service import export_payload, import_payload
 
@@ -106,7 +107,19 @@ def ack_alerts(
 # --------------------------------------------------------------------- busca
 @router.post("/search")
 def search(payload: SearchRequest) -> dict:
-    """Busca inteligente: agrega lojas, agrupa produtos e aponta o menor preco."""
+    """Busca inteligente: agrega lojas, agrupa produtos e aponta o menor preco.
+
+    O estado da prateleira (enviado pelo navegador) serve apenas para marcar
+    quais resultados ja estao na banca. O servidor nao guarda nada.
+    """
+    if payload.state:
+        db = open_state_session()
+        try:
+            load_state(db, payload.state)
+            return smart_search(db, payload.query, sources=payload.sources, limit=payload.limit)
+        finally:
+            db.close()
+
     from app.database import SessionLocal
 
     db = SessionLocal()
@@ -114,6 +127,22 @@ def search(payload: SearchRequest) -> dict:
         return smart_search(db, payload.query, sources=payload.sources, limit=payload.limit)
     finally:
         db.close()
+
+
+# ------------------------------------------------------- motor stateless (banca)
+@router.post("/state")
+def state_endpoint(payload: dict = Body(...)) -> dict:
+    """Recebe a prateleira do navegador, aplica a acao e devolve o estado novo.
+
+    O servidor nao persiste nada: guarda a prateleira e responsabilidade do
+    navegador. Aqui so acontecem scraping e calculos.
+    """
+    try:
+        return run_action(payload)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc).strip("'")) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 # --------------------------------------------------------------------- banca

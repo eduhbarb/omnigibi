@@ -62,7 +62,7 @@ class Settings:
     """Configuracao imutavel da aplicacao."""
 
     app_name: str = "Omnigibi"
-    version: str = "1.5.0"
+    version: str = "1.6.0"
     currency: str = "BRL"
     currency_symbol: str = "R$"
 

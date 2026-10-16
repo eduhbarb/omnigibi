@@ -9,6 +9,8 @@ class SearchRequest(BaseModel):
     query: str = Field(min_length=2, max_length=200)
     sources: list[str] | None = None
     limit: int | None = Field(default=None, ge=1, le=50)
+    # Prateleira do navegador (stateless): permite marcar o que ja esta na banca.
+    state: dict | None = None
 
     @field_validator("query")
     @classmethod

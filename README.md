@@ -8,6 +8,11 @@ o quanto o preço subiu/caiu (R$ e %) e o desconto vigente em %.
 Backend em **Python (FastAPI)** + interface web própria (HTML/CSS/JS sem
 dependências externas).
 
+**Onde ficam os dados:** a prateleira (quadrinhos, histórico e avisos) é salva no
+**navegador do usuário**. O servidor é *stateless*: ele recebe esse estado,
+consulta as lojas, calcula os indicadores e devolve o estado atualizado — nada
+fica guardado no servidor.
+
 ---
 
 ## ✨ O que ele faz
@@ -191,24 +196,31 @@ Copie `.env.example` para `.env`:
 
 ## 🗺️ Endpoints principais
 
+> **Onde ficam os dados:** a prateleira (quadrinhos, histórico e avisos) fica
+> salva no **navegador do usuário**. O servidor não guarda nada: ele recebe o
+> estado, consulta as lojas, calcula e devolve o estado atualizado. Por isso o
+> endpoint principal é `POST /api/state`.
+
 | Método | Rota | Descrição |
 |---|---|---|
-| `POST` | `/api/search` | Busca inteligente agregada (não persiste). Resposta: `results` (produtos), `related` (outros volumes/parecidos), `query_volume`, `query_variants` e o relatório de cada fonte. |
-| `GET` | `/api/comics` | Prateleira com preço atual, menor histórico e desconto. |
-| `POST` | `/api/comics` | Adiciona um quadrinho e já coleta os preços. |
-| `GET` | `/api/comics/{id}` | Detalhe: ofertas, histórico consolidado e por loja. |
-| `PATCH` | `/api/comics/{id}` | Edita dados e define o **preço alvo**. |
+| `POST` | `/api/state` | **Motor stateless.** Recebe a prateleira do navegador + uma `action` (`sync`, `add`, `refresh`, `remove`, `update`, `ack_alerts`, `import`, `detail`) e devolve `comics`, `stats`, `changes`, `alerts` e o novo `state` para o navegador guardar. |
+| `POST` | `/api/search` | Busca inteligente agregada (não persiste). Resposta: `results` (produtos), `related` (outros volumes/parecidos), `query_volume`, `query_variants` e o relatório de cada fonte. Aceita `state` para marcar o que já está na banca. |
+| `GET` | `/api/comics` | Prateleira do **banco local** (modo servidor: CLI e testes). |
+| `POST` | `/api/comics` | Adiciona um quadrinho e já coleta os preços (modo servidor). |
+| `GET` | `/api/comics/{id}` | Detalhe: ofertas, histórico consolidado e por loja (modo servidor). |
+| `PATCH` | `/api/comics/{id}` | Edita dados e define o **preço alvo** (modo servidor). |
 | `DELETE` | `/api/comics/{id}` | Remove da banca (apaga o histórico). |
-| `POST` | `/api/comics/{id}/refresh` | Reconsulta as lojas e registra as variações. |
+| `POST` | `/api/comics/{id}/refresh` | Reconsulta as lojas e registra as variações (modo servidor). |
 | `GET` | `/api/comics/{id}/history` | Histórico com delta, delta % e desconto %. |
 | `GET` | `/api/comics/{id}/history.csv` | Exporta o histórico em CSV. |
-| `POST` | `/api/refresh` | Atualiza toda a banca. |
+| `POST` | `/api/refresh` | Atualiza toda a banca do banco local (modo servidor). |
 | `GET` | `/api/changes` | Últimas variações registradas. |
 | `GET` | `/api/alerts` | Avisos de monitoração (ex.: produto que voltou ao estoque). Inclui `unseen`. |
 | `POST` | `/api/alerts/ack` | Marca um aviso (`{"alert_id": 1}`) ou todos como lidos. |
-| `GET` | `/api/export` | Exporta a prateleira inteira (quadrinhos + histórico + avisos) em JSON. |
+| `GET` | `/api/export` | Exporta o banco local inteiro em JSON. |
 | `POST` | `/api/import` | Importa um arquivo exportado fazendo **merge** (não apaga nada). |
 | `GET` | `/api/stats` · `/api/sources` | Indicadores e fontes disponíveis. |
+
 
 ---
 
@@ -217,10 +229,12 @@ Copie `.env.example` para `.env`:
 O rodapé da página tem **Exportar dados (JSON)** e **Importar dados (JSON)**. O
 arquivo leva os quadrinhos, o histórico (melhor preço + por loja) e as
 **preferências** de interface (fontes escolhidas, filtro da prateleira, "só no
-menor preço"). A importação faz **merge**: casa pelo título normalizado e
+menor preço"). Como a prateleira já vive no navegador, exportar é só baixar uma
+cópia e importar faz **merge** no que já existe: casa pelo título normalizado e
 descarta observações de histórico já existentes — importar o mesmo arquivo duas
 vezes não duplica nada. As preferências do arquivo só substituem as suas se a
-opção "aplicar preferências do arquivo" estiver marcada.
+opção "aplicar preferências do arquivo" estiver marcada. Use o backup para
+**trocar de navegador ou de máquina**.
 
 ---
 
@@ -251,9 +265,10 @@ banca-quadrinhos/
 │       ├── price_service.py   # histórico, delta, desconto, snapshots e avisos
 │       ├── search_service.py  # busca agregada + clustering + ranking
 │       ├── banca_service.py   # adicionar/atualizar/seed/estatísticas
+│       ├── state_service.py   # motor stateless (estado do navegador em SQLite na memória)
 │       └── scheduler.py       # atualização periódica
 ├── web/                       # interface (index.html, styles.css, app.js)
-└── tests/                     # 50 testes (unidade + integração)
+└── tests/                     # 63 testes (unidade + integração)
 ```
 
 ---
@@ -295,14 +310,23 @@ DATABASE_URL=postgresql+psycopg://usuario:senha@host/banco
 
 ### Limites da Vercel (importante)
 
-- **Sem disco persistente.** O SQLite em `/tmp` é apagado a cada *cold start*.
-  Sem um Postgres, use **Exportar/Importar JSON** para não perder a prateleira.
-- **Sem cron/APScheduler.** Use o botão **Atualizar tudo** (ou um cron externo
-  chamando `POST /api/refresh`).
+- **Sem banco no servidor (por design).** A prateleira fica no `localStorage` do
+  navegador, então nada se perde entre *cold starts*. O servidor é só motor de
+  scraping e cálculo (`POST /api/state`).
+- **Sem cron/APScheduler.** Use o botão **Atualizar tudo** para reconsultar as
+  lojas quando quiser.
 - **Timeout de função.** Buscas em muitas lojas podem estourar o limite do plano
   (Hobby é curto). Reduza `ENABLED_SOURCES` se der timeout.
 - `curl_cffi` (usado na Panini) é um binário grande; o bundle ainda cabe, mas
   fique atento ao tamanho.
+
+> **Por que não usar o SQLite do servidor?** O disco das funções serverless é
+> efêmero e várias instâncias atendem em paralelo, cada uma com o seu `/tmp`.
+> Guardar a prateleira lá fazia os quadrinhos "sumirem" e voltarem a cada
+> recarga. Se algum dia você quiser dados compartilhados entre dispositivos,
+> troque `DATABASE_URL` por um Postgres (Vercel Postgres / Neon) e use os
+> endpoints de banco local.
+
 
 ### Subir para o GitHub (local)
 

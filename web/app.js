@@ -7,6 +7,7 @@ const state = {
   sources: [],
   selected: new Set(),
   banca: [],
+  store: null, // prateleira do navegador (quadrinhos + histórico + avisos)
   filter: "",
   onlyLowest: false,
   spark: new Map(),
@@ -89,51 +90,71 @@ async function api(path, options = {}) {
   return payload;
 }
 
-/* ------------------------------------------ persistência local do navegador
- * A fonte da verdade é o backend (SQLite). Só que na Vercel o arquivo vive em
- * /tmp e some no "cold start", deixando a prateleira vazia. Para ela reaparecer
- * na hora, espelhamos o export completo no localStorage e restauramos quando o
- * servidor volta vazio. É cache de recuperação, não a fonte da verdade. */
-const LOCAL_BACKUP_KEY = "omnigibi:auto-backup";
+/* ------------------------------------------------ estado no navegador (store)
+ * A prateleira vive AQUI, no navegador. O servidor é só motor de scraping e
+ * cálculo: recebe o estado, aplica a ação e devolve o estado recalculado.
+ * Na Vercel o disco é efêmero e há várias instâncias em paralelo, então guardar
+ * a prateleira no servidor fazia os quadrinhos sumirem a cada recarga. */
+const STORE_KEY = "omnigibi:state:v1";
 
-function readLocalBackup() {
+function readStore() {
   try {
-    const raw = localStorage.getItem(LOCAL_BACKUP_KEY);
+    const raw = localStorage.getItem(STORE_KEY);
     return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
   }
 }
 
-let backupTimer = null;
-function scheduleBackup(delay = 600) {
-  clearTimeout(backupTimer);
-  backupTimer = setTimeout(async () => {
-    try {
-      const data = await api("/api/export");
-      if (!data?.comics?.length) {
-        // servidor vazio (cold start): nunca sobrescreve um backup bom.
-        const existing = readLocalBackup();
-        if (existing?.comics?.length) return;
-      }
-      localStorage.setItem(LOCAL_BACKUP_KEY, JSON.stringify(data));
-    } catch {
-      /* cota cheia ou modo privado: segue sem backup local */
+// Versões anteriores guardavam a prateleira na chave de backup automático.
+// Traz esses dados para a chave nova uma única vez.
+function migrateLegacyBackup() {
+  if (readStore()) return;
+  if (state.store) return;
+  try {
+    const raw = localStorage.getItem("omnigibi:auto-backup");
+    if (!raw) return;
+    const legacy = JSON.parse(raw);
+    if (legacy?.comics?.length) {
+      state.store = legacy;
+      writeStore(legacy);
     }
-  }, delay);
+    localStorage.removeItem("omnigibi:auto-backup");
+  } catch {
+    /* ignora backup inválido */
+  }
 }
 
-async function restoreBackupIfEmpty() {
-  if (state.banca.length) return false;
-  const data = readLocalBackup();
-  if (!data || !Array.isArray(data.comics) || !data.comics.length) return false;
+function writeStore(store) {
+  if (!store) return;
   try {
-    const res = await api("/api/import", { method: "POST", body: JSON.stringify(data) });
-    toast(`Prateleira restaurada do navegador: ${res.detail}`, "ok");
-    return true;
+    localStorage.setItem(STORE_KEY, JSON.stringify(store));
   } catch {
-    return false;
+    toast("Armazenamento do navegador cheio — exporte um backup JSON.", "warn");
   }
+}
+
+// Manda o estado atual + a ação pedida; o servidor devolve tudo recalculado.
+async function callState(action = "sync", extra = {}) {
+  const body = { action, ...extra };
+  const store = state.store || readStore();
+  if (store) body.state = store;
+  const view = await api("/api/state", { method: "POST", body: JSON.stringify(body) });
+  applyView(view);
+  return view;
+}
+
+function applyView(view) {
+  if (!view) return;
+  if (view.state) {
+    state.store = view.state;
+    writeStore(view.state);
+  }
+  if (view.comics) state.banca = view.comics;
+  if (view.stats) renderStats(view.stats);
+  if (view.changes) renderChanges(view.changes);
+  if (view.alerts) renderAlerts(view.alerts);
+  renderBanca();
 }
 
 function pendingCard(cached) {
@@ -362,17 +383,18 @@ function selectedSources() {
 }
 
 /* ------------------------------------------------------------------- stats */
-async function loadStats() {
-  const data = await api("/api/stats");
+function renderStats(data) {
+  if (!data) return;
   $("#stat-comics").textContent = data.total_comics;
   $("#stat-offers").textContent = data.total_offers;
   $("#stat-history").textContent = data.total_history;
   $("#stat-drops").textContent = data.drops;
 }
 
-async function loadChanges() {
-  const rows = await api("/api/changes?hours=168&limit=25");
+function renderChanges(rows) {
   const node = $("#changes");
+  if (!node) return;
+  rows = rows || [];
   if (!rows.length) {
     node.innerHTML = `<div class="empty">Nenhuma mudança de preço registrada ainda. Use “Atualizar tudo” para começar o histórico.</div>`;
     return;
@@ -395,10 +417,10 @@ async function loadChanges() {
 }
 
 /* ------------------------------------------------------------------- avisos */
-async function loadAlerts() {
+function renderAlerts(data) {
   const node = $("#alerts");
   if (!node) return;
-  const data = await api("/api/alerts?limit=30");
+  data = data || { unseen: 0, alerts: [] };
   const unseen = data.unseen || 0;
   const badge = $("#alerts-count");
   if (badge) {
@@ -426,9 +448,8 @@ async function loadAlerts() {
 
 async function ackAlerts() {
   try {
-    await api("/api/alerts/ack", { method: "POST", body: JSON.stringify({}) });
-    toast("Avisos marcados como lidos", "ok");
-    await loadAlerts();
+    const view = await callState("ack_alerts", {});
+    toast(view.detail || "Avisos marcados como lidos", "ok");
   } catch (error) {
     toast(`Erro: ${error.message}`, "err");
   }
@@ -451,7 +472,11 @@ async function runSearch(event) {
   try {
     const data = await api("/api/search", {
       method: "POST",
-      body: JSON.stringify({ query, sources: selectedSources() }),
+      body: JSON.stringify({
+        query,
+        sources: selectedSources(),
+        state: state.store || readStore(),
+      }),
     });
     renderSearchResults(data);
   } catch (error) {
@@ -581,22 +606,20 @@ async function addToBanca(title, button) {
 
   try {
     // As ofertas já vieram da busca: grava direto. Sem re-scraping síncrono.
-    const response = await api("/api/comics", {
-      method: "POST",
-      body: JSON.stringify({
+    const view = await callState("add", {
+      comic: {
         title: cached.title,
         publisher: cached.publisher,
         issue: cached.volume || null,
         volume: cached.volume || null,
         cover_url: cached.image_url,
-        reference_price: cached.reference_price || cached.best.list_price || null,
+        reference_price: cached.reference_price || cached.best?.list_price || null,
         offers: cached.offers,
-        sources: selectedSources(),
-        scrape: false,
-      }),
+      },
+      sources: selectedSources(),
+      scrape: false,
     });
-    toast(response.detail, "ok");
-    await Promise.all([loadBanca(), loadStats(), loadChanges(), loadAlerts()]);
+    toast(view.detail || "Quadrinho adicionado à banca", "ok");
   } catch (error) {
     phantom?.remove();
     toast(`Erro ao adicionar: ${error.message}`, "err");
@@ -606,37 +629,48 @@ async function addToBanca(title, button) {
 }
 
 /* ------------------------------------------------------------------- banca */
-async function loadBanca() {
-  const params = new URLSearchParams();
-  if (state.filter) params.set("q", state.filter);
-  if (state.onlyLowest) params.set("only_lowest", "true");
-  state.banca = await api(`/api/comics?${params.toString()}`);
+function visibleComics() {
+  const needle = state.filter ? state.filter.toLowerCase() : "";
+  return state.banca.filter((comic) => {
+    if (needle) {
+      const haystack = `${comic.title} ${comic.publisher || ""}`.toLowerCase();
+      if (!haystack.includes(needle)) return false;
+    }
+    if (state.onlyLowest && !comic.snapshot?.is_lowest_ever) return false;
+    return true;
+  });
+}
 
+function renderBanca() {
   const container = $("#banca");
-  if (!state.banca.length) {
-    container.innerHTML = `<div class="empty">A prateleira está vazia. Busque um quadrinho acima para começar a monitorar.</div>`;
+  if (!container) return;
+  const comics = visibleComics();
+  if (!comics.length) {
+    container.innerHTML = `<div class="empty">${
+      state.banca.length
+        ? "Nenhum quadrinho bate com o filtro."
+        : "A prateleira está vazia. Busque um quadrinho acima para começar a monitorar."
+    }</div>`;
     return;
   }
 
-  container.innerHTML = state.banca.map(bancaCard).join("");
+  container.innerHTML = comics.map(bancaCard).join("");
 
   container.querySelectorAll("[data-refresh]").forEach((button) =>
-    button.addEventListener("click", () => refreshComic(Number(button.dataset.refresh), button))
+    button.addEventListener("click", () => refreshComic(button.dataset.refresh, button))
   );
   container.querySelectorAll("[data-open]").forEach((button) =>
-    button.addEventListener("click", () => openDetail(Number(button.dataset.open)))
+    button.addEventListener("click", () => openDetail(button.dataset.open))
   );
   container.querySelectorAll("[data-remove]").forEach((button) =>
-    button.addEventListener("click", () => removeComic(Number(button.dataset.remove)))
+    button.addEventListener("click", () => removeComic(button.dataset.remove))
   );
 
   // desenha os sparklines
   container.querySelectorAll("canvas.spark").forEach((canvas) => {
-    const points = state.spark.get(Number(canvas.dataset.spark));
+    const points = state.spark.get(canvas.dataset.spark);
     if (points) drawSpark(canvas, points);
   });
-
-  scheduleBackup();
 }
 
 function bancaCard(comic) {
@@ -657,7 +691,7 @@ function bancaCard(comic) {
     if (change.change_type === "alta") badges.push(deltaBadge(change.delta, change.delta_pct));
   }
 
-  state.spark.set(comic.id, comic.sparkline || []);
+  state.spark.set(comic.key, comic.sparkline || []);
 
   const priceRow = snapshot.current_price !== null && snapshot.current_price !== undefined
     ? `<div class="price-row" style="margin-top:8px">
@@ -692,27 +726,23 @@ function bancaCard(comic) {
         <span>registros: <b>${snapshot.history_count}</b></span>
       </div>
 
-      <canvas class="spark" data-spark="${comic.id}" height="40"></canvas>
+      <canvas class="spark" data-spark="${esc(comic.key)}" height="40"></canvas>
 
       <div class="card__actions">
         ${buyButton(snapshot.current_offer_url)}
-        <button class="btn btn--ghost btn--sm" data-refresh="${comic.id}">↻ Atualizar preços</button>
-        <button class="btn btn--sm" data-open="${comic.id}">📊 Histórico</button>
-        <button class="btn btn--danger btn--sm" data-remove="${comic.id}">Remover</button>
+        <button class="btn btn--ghost btn--sm" data-refresh="${esc(comic.key)}">↻ Atualizar preços</button>
+        <button class="btn btn--sm" data-open="${esc(comic.key)}">📊 Histórico</button>
+        <button class="btn btn--danger btn--sm" data-remove="${esc(comic.key)}">Remover</button>
       </div>
     </article>`;
 }
 
-async function refreshComic(id, button) {
+async function refreshComic(key, button) {
   button.disabled = true;
   button.textContent = "consultando lojas...";
   try {
-    const data = await api(`/api/comics/${id}/refresh`, {
-      method: "POST",
-      body: JSON.stringify({ sources: selectedSources() }),
-    });
-    toast(data.detail, "ok");
-    await Promise.all([loadBanca(), loadStats(), loadChanges(), loadAlerts()]);
+    const view = await callState("refresh", { key, sources: selectedSources() });
+    toast(view.detail || "Preços atualizados", "ok");
   } catch (error) {
     toast(`Erro: ${error.message}`, "err");
     button.disabled = false;
@@ -720,25 +750,24 @@ async function refreshComic(id, button) {
   }
 }
 
-async function removeComic(id) {
+async function removeComic(key) {
   try {
-    await api(`/api/comics/${id}`, { method: "DELETE" });
-    toast("Quadrinho removido da banca", "ok");
-    await Promise.all([loadBanca(), loadStats()]);
+    const view = await callState("remove", { key });
+    toast(view.detail || "Quadrinho removido da banca", "ok");
   } catch (error) {
     toast(`Erro ao remover: ${error.message}`, "err");
   }
 }
 
 /* ------------------------------------------------------------------ modal */
-async function openDetail(id) {
+async function openDetail(key) {
   $("#modal").hidden = false;
   $("#modal-title").textContent = "Carregando...";
   $("#modal-body").innerHTML = '<div class="empty"><span class="spinner"></span>Carregando histórico...</div>';
 
   try {
-    const comic = await api(`/api/comics/${id}?history_limit=300`);
-    renderDetail(comic);
+    const view = await callState("detail", { key });
+    renderDetail(view.comic);
   } catch (error) {
     $("#modal-body").innerHTML = `<div class="feedback feedback--error">Erro: ${esc(error.message)}</div>`;
   }
@@ -815,7 +844,7 @@ function renderDetail(comic) {
       <button class="btn btn--sm btn--primary" id="save-target">Salvar alerta</button>
       <button class="btn btn--sm btn--ghost" id="modal-refresh">↻ Reconsultar lojas</button>
       ${buyButton(snapshot.current_offer_url)}
-      <a class="btn btn--sm btn--ghost" href="/api/comics/${comic.id}/history.csv">⬇ Exportar CSV</a>
+      <button class="btn btn--sm btn--ghost" id="export-csv">⬇ Exportar CSV</button>
     </div>
 
     <div class="section-title">Ofertas por loja (${(comic.offers || []).length})</div>
@@ -839,16 +868,18 @@ function renderDetail(comic) {
 
   drawChart(document.getElementById("detail-chart"), chartPoints);
 
+  const csvBtn = document.getElementById("export-csv");
+  if (csvBtn) csvBtn.addEventListener("click", () => exportComicCsv(comic));
+
   document.getElementById("save-target").addEventListener("click", async () => {
     const value = document.getElementById("target-input").value;
     try {
-      await api(`/api/comics/${comic.id}`, {
-        method: "PATCH",
-        body: JSON.stringify({ target_price: value === "" ? null : Number(value) }),
+      await callState("update", {
+        key: comic.key,
+        patch: { target_price: value === "" ? null : Number(value) },
       });
       toast("Alerta de preço salvo", "ok");
-      await Promise.all([loadBanca(), loadStats()]);
-      openDetail(comic.id);
+      openDetail(comic.key);
     } catch (error) {
       toast(`Erro: ${error.message}`, "err");
     }
@@ -859,13 +890,9 @@ function renderDetail(comic) {
     button.disabled = true;
     button.textContent = "consultando...";
     try {
-      const data = await api(`/api/comics/${comic.id}/refresh`, {
-        method: "POST",
-        body: JSON.stringify({ sources: selectedSources() }),
-      });
-      toast(data.detail, "ok");
-      await Promise.all([loadBanca(), loadStats(), loadChanges(), loadAlerts()]);
-      openDetail(comic.id);
+      const view = await callState("refresh", { key: comic.key, sources: selectedSources() });
+      toast(view.detail || "Preços atualizados", "ok");
+      openDetail(comic.key);
     } catch (error) {
       toast(`Erro: ${error.message}`, "err");
       button.disabled = false;
@@ -884,9 +911,8 @@ async function refreshAll(button) {
   const original = button.textContent;
   button.textContent = "atualizando...";
   try {
-    const data = await api("/api/refresh", { method: "POST", body: JSON.stringify({}) });
-    toast(`${data.detail} · ${data.result.total_history_entries} variação(ões)`, "ok");
-    await Promise.all([loadBanca(), loadStats(), loadChanges(), loadAlerts()]);
+    const view = await callState("refresh", { sources: selectedSources() });
+    toast(view.detail || "Preços atualizados", "ok");
   } catch (error) {
     toast(`Erro: ${error.message}`, "err");
   } finally {
@@ -960,16 +986,47 @@ async function exportData() {
   const button = $("#btn-export");
   button.disabled = true;
   try {
-    const data = await api("/api/export");
+    if (!state.store) await callState("sync");
+    const data = { ...(state.store || { comics: [], alerts: [] }) };
     data.preferences = loadPrefs();
     const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
-    downloadJSON(data, `banca-quadrinhos-${stamp}.json`);
+    downloadJSON(data, `omnigibi-${stamp}.json`);
     toast(`${(data.comics || []).length} quadrinho(s) exportado(s)`, "ok");
   } catch (error) {
     toast(`Erro ao exportar: ${error.message}`, "err");
   } finally {
     button.disabled = false;
   }
+}
+
+function exportComicCsv(comic) {
+  const num = (value) =>
+    value === null || value === undefined ? "" : Number(value).toFixed(2).replace(".", ",");
+  const lines = ["data;loja;preco;preco_anterior;variacao;variacao_pct;desconto_pct;menor_ate_aqui;tipo"];
+  for (const row of (comic.history || []).slice().reverse()) {
+    lines.push(
+      [
+        dateTime(row.recorded_at),
+        row.source || "melhor preco",
+        num(row.price),
+        num(row.previous_price),
+        num(row.delta),
+        num(row.delta_pct),
+        num(row.discount_pct),
+        num(row.lowest_ever),
+        row.change_type || "",
+      ].join(";")
+    );
+  }
+  const blob = new Blob(["\ufeff" + lines.join("\n")], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `historico-${comic.key || "quadrinho"}.csv`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
 }
 
 async function importData(file, applyPrefsFlag) {
@@ -981,10 +1038,7 @@ async function importData(file, applyPrefsFlag) {
     return;
   }
   try {
-    const response = await api("/api/import", {
-      method: "POST",
-      body: JSON.stringify(data),
-    });
+    const view = await callState("import", { import_state: data });
     if (applyPrefsFlag && data.preferences) {
       localStorage.setItem(
         PREFS_KEY,
@@ -992,8 +1046,7 @@ async function importData(file, applyPrefsFlag) {
       );
       applyPreferences(data.preferences);
     }
-    toast(`Importado — ${response.detail}`, "ok");
-    await Promise.all([loadBanca(), loadStats(), loadChanges(), loadAlerts()]);
+    toast(`Importado — ${view.detail}`, "ok");
   } catch (error) {
     toast(`Erro ao importar: ${error.message}`, "err");
   }
@@ -1010,11 +1063,12 @@ async function init() {
     toast(`Não foi possível carregar as fontes: ${error.message}`, "err");
   }
 
-  await Promise.all([loadBanca(), loadStats(), loadChanges(), loadAlerts()]);
-
-  // Servidor vazio (cold start na Vercel)? Traz a prateleira do backup local.
-  if (await restoreBackupIfEmpty()) {
-    await Promise.all([loadBanca(), loadStats(), loadChanges(), loadAlerts()]);
+  // Uma única chamada: o servidor calcula tudo a partir do estado do navegador.
+  migrateLegacyBackup();
+  try {
+    await callState("sync");
+  } catch (error) {
+    toast(`Não foi possível carregar a prateleira: ${error.message}`, "err");
   }
 
   $("#search-form").addEventListener("submit", runSearch);
@@ -1039,7 +1093,7 @@ async function init() {
   $("#filter-lowest").addEventListener("change", (event) => {
     state.onlyLowest = event.target.checked;
     persistPrefs();
-    loadBanca();
+    renderBanca();
   });
 
   $("#modal").addEventListener("click", (event) => {
@@ -1063,7 +1117,7 @@ async function init() {
 let bancaTimer = null;
 function debounceBanca() {
   clearTimeout(bancaTimer);
-  bancaTimer = setTimeout(loadBanca, 260);
+  bancaTimer = setTimeout(renderBanca, 200);
 }
 
 document.addEventListener("DOMContentLoaded", init);
